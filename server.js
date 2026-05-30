@@ -111,6 +111,7 @@ app.get('/warteliste/status/:id', (req, res) => {
 // Kunde stellt Anfrage
 app.post('/termine/anfragen', (req, res) => {
   const { benutzer_id, termin_id } = req.body;
+  console.log('Anfrage:', benutzer_id, termin_id); 
   db.query(
     `SELECT * FROM Termin WHERE benutzer_id = ? AND zeitdatum >= NOW() AND status IN ('gebucht', 'angefragt')`,
     [benutzer_id],
