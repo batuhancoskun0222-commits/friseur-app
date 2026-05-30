@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 
-const API = "http://192.168.178.174:3000";
+const API = "https://friseur-server.onrender.com";
 
 function useWebSocket(onUpdate) {
   useEffect(() => {
-    const ws = new WebSocket(`ws://192.168.178.174:3000`);
+   const ws = new WebSocket(`wss://friseur-server.onrender.com`);
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.typ === "update") onUpdate();

@@ -23,7 +23,7 @@ export default function Login({ onLogin }) {
     setMeldung({ text: "", typ: "" });
 
     const url = modus === "login" ? "/login" : "/register";
-    const res = await fetch(`http://192.168.178.174:3000${url}`, {
+    const res = await fetch(`https://friseur-server.onrender.com${url}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ vorname: vorname.trim(), nachname: nachname.trim(), passwort })
