@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const API = "https://friseur-server.onrender.com";
 
-// BUG FIX: WebSocket nutzt jetzt die richtige IP statt localhost
 function useWebSocket(onUpdate) {
   useEffect(() => {
     const ws = new WebSocket(`wss://friseur-server.onrender.com`);
@@ -67,6 +66,14 @@ export default function AdminSeite({ benutzer, onLogout }) {
   const [resetBenutzer, setResetBenutzer] = useState("");
   const [resetPasswort, setResetPasswort] = useState("");
 
+  // ─── NACHRICHTEN ───────────────────────────────────────────────────────────
+  const [konversationen, setKonversationen] = useState([]);
+  const [aktiverKunde, setAktiverKunde] = useState(null); // { benutzer_id, vorname, nachname }
+  const [nachrichten, setNachrichten] = useState([]);
+  const [nachrichtText, setNachrichtText] = useState("");
+  const [nachrichtenBadge, setNachrichtenBadge] = useState(0);
+  const chatEndRef = useRef(null);
+
   useEffect(() => {
     setTimeout(() => setMounted(true), 50);
   }, []);
@@ -76,18 +83,38 @@ export default function AdminSeite({ benutzer, onLogout }) {
     setTermine(await res.json());
   }, []);
 
+  const ladeKonversationen = useCallback(async () => {
+    const [r1, r2] = await Promise.all([
+      fetch(`${API}/admin/nachrichten/konversationen`),
+      fetch(`${API}/admin/nachrichten/ungelesen/gesamt`),
+    ]);
+    const [k, u] = await Promise.all([r1.json(), r2.json()]);
+    setKonversationen(Array.isArray(k) ? k : []);
+    setNachrichtenBadge(u.count || 0);
+  }, []);
+
+  const ladeNachrichten = useCallback(async (kundenId) => {
+    const res = await fetch(`${API}/admin/nachrichten/${kundenId}`);
+    const data = await res.json();
+    setNachrichten(Array.isArray(data) ? data : []);
+    // Nach Laden: Badge neu berechnen
+    ladeKonversationen();
+  }, [ladeKonversationen]);
+
   useWebSocket(() => {
     setLiveIndikator(true);
     ladeTermine();
+    ladeKonversationen();
+    if (aktiverKunde) ladeNachrichten(aktiverKunde.benutzer_id);
     setTimeout(() => setLiveIndikator(false), 2000);
   });
 
   useEffect(() => { ladeTermine(); }, [ladeTermine]);
+  useEffect(() => { ladeKonversationen(); }, [ladeKonversationen]);
   useEffect(() => {
     fetch(`${API}/admin/benutzer`).then(r => r.json()).then(setBenutzerListe);
   }, []);
 
-  // Automatisches Löschen alter Termine beim Laden
   useEffect(() => {
     fetch(`${API}/admin/termine/alt/alle`, { method: "DELETE" })
       .then(r => r.json())
@@ -100,9 +127,32 @@ export default function AdminSeite({ benutzer, onLogout }) {
       .catch(() => {});
   }, []); // eslint-disable-line
 
+  // Chat scroll to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [nachrichten]);
+
   function zeig(text, typ = "ok") {
     setMeldung({ text, typ });
     setTimeout(() => setMeldung({ text: "", typ: "" }), 3500);
+  }
+
+  async function konversationÖffnen(kunde) {
+    setAktiverKunde(kunde);
+    await ladeNachrichten(kunde.benutzer_id);
+  }
+
+  async function nachrichtSenden() {
+    if (!nachrichtText.trim() || !aktiverKunde) return;
+    const res = await fetch(`${API}/admin/nachrichten/${aktiverKunde.benutzer_id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminId: benutzer.id, text: nachrichtText.trim() }),
+    });
+    const d = await res.json();
+    if (d.error) return zeig(d.error, "fehler");
+    setNachrichtText("");
+    ladeNachrichten(aktiverKunde.benutzer_id);
   }
 
   async function terminErstellen() {
@@ -195,10 +245,9 @@ export default function AdminSeite({ benutzer, onLogout }) {
     ladeTermine();
   }
 
-  // Mehrere Termine auf einmal löschen
   async function ausgewählteLoeschen() {
     if (ausgewählt.size === 0) return;
-    if (!window.confirm(`${ausgewählt.size} Termin${ausgewählt.size > 1 ? "e" : ""} wirklich löschen? Kunden mit gebuchten Terminen werden benachrichtigt.`)) return;
+    if (!window.confirm(`${ausgewählt.size} Termin${ausgewählt.size > 1 ? "e" : ""} wirklich löschen?`)) return;
     const ids = Array.from(ausgewählt);
     let gelöscht = 0;
     for (const id of ids) {
@@ -240,6 +289,14 @@ export default function AdminSeite({ benutzer, onLogout }) {
       zeit: d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
       full: d
     };
+  }
+
+  function fmtZeit(dt) {
+    return new Date(dt).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function fmtDatum(dt) {
+    return new Date(dt).toLocaleDateString("de-DE", { day: "2-digit", month: "short" });
   }
 
   const wochentage = Array.from({ length: 7 }, (_, i) => {
@@ -288,7 +345,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
       offen: { bg: "#fafaf8", border: "#ede8e0", badge: "rgba(160,136,122,0.1)", badgeText: "#a0887a" },
       angefragt: { bg: "#fffbeb", border: "#fcd34d", badge: "rgba(245,158,11,0.12)", badgeText: "#92400e" },
       gebucht: { bg: "#f0faf4", border: "#86efac", badge: "rgba(74,222,128,0.12)", badgeText: "#166534" },
-      // BUG FIX: abgesagt und abgelehnt haben eigene Farben
       abgesagt: { bg: "#fff7ed", border: "#fdba74", badge: "rgba(251,146,60,0.12)", badgeText: "#c2410c" },
       abgelehnt: { bg: "#fef2f2", border: "#fca5a5", badge: "rgba(239,68,68,0.1)", badgeText: "#b91c1c" },
     };
@@ -301,8 +357,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
     };
 
     const sc = statusColors[t.status] || statusColors.offen;
-
-    // BUG FIX: Abgesagte/Abgelehnte Termine können nicht bearbeitet werden (nur gelöscht)
     const kannBearbeiten = t.status !== "abgesagt" && t.status !== "abgelehnt";
 
     return (
@@ -312,7 +366,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
         borderColor: istAusgewählt ? "#2c1810" : sc.border,
         outline: istAusgewählt ? "2px solid rgba(44,24,16,0.15)" : "none",
       }}>
-        {/* Card head */}
         <div style={a.terminHead}>
           {auswahlModus && (
             <div
@@ -356,7 +409,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
           </div>
         </div>
 
-        {/* Action bar – nur wenn nicht im Auswahlmodus */}
         {!aktiv && !auswahlModus && (
           <div style={a.actionBar}>
             {t.status === "angefragt" && (
@@ -388,10 +440,9 @@ export default function AdminSeite({ benutzer, onLogout }) {
           </div>
         )}
 
-        {/* Inline: Bestätigen */}
         {istBestätigen && (
           <div style={a.inlineForm}>
-            <p style={a.inlineTitle} data-type="ok">✓ {t.vorname} {t.nachname} bestätigen</p>
+            <p style={a.inlineTitle}>✓ {t.vorname} {t.nachname} bestätigen</p>
             <div style={a.formGroup}>
               <label style={a.formLabel}>Nachricht an Kunden (optional)</label>
               <input type="text" style={a.formInput} placeholder="z.B. Bitte pünktlich erscheinen"
@@ -404,10 +455,9 @@ export default function AdminSeite({ benutzer, onLogout }) {
           </div>
         )}
 
-        {/* Inline: Ablehnen */}
         {istAblehnen && (
           <div style={a.inlineForm}>
-            <p style={a.inlineTitle} data-type="danger">✕ Anfrage von {t.vorname} {t.nachname} ablehnen</p>
+            <p style={a.inlineTitle}>✕ Anfrage von {t.vorname} {t.nachname} ablehnen</p>
             <div style={a.formGroup}>
               <label style={a.formLabel}>Grund (optional – für den Kunden sichtbar)</label>
               <input type="text" style={a.formInput} placeholder="z.B. Termin bereits vergeben"
@@ -420,10 +470,9 @@ export default function AdminSeite({ benutzer, onLogout }) {
           </div>
         )}
 
-        {/* Inline: Absagen */}
         {istAbsagen && (
           <div style={a.inlineForm}>
-            <p style={a.inlineTitle} data-type="danger">Termin von {t.vorname} {t.nachname} absagen</p>
+            <p style={a.inlineTitle}>Termin von {t.vorname} {t.nachname} absagen</p>
             <p style={{ margin: "0 0 8px", fontSize: "12px", color: "#a0887a" }}>
               Der Kunde wird benachrichtigt und kann einen neuen Termin anfragen.
             </p>
@@ -439,7 +488,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
           </div>
         )}
 
-        {/* Inline: Bearbeiten */}
         {istBearbeiten && (
           <div style={a.inlineForm}>
             <p style={a.inlineTitle}>Termin bearbeiten</p>
@@ -470,6 +518,7 @@ export default function AdminSeite({ benutzer, onLogout }) {
 
   const tabs = [
     { id: "kalender", label: "Kalender", badge: offeneAnfragen.length > 0 ? offeneAnfragen.length : null },
+    { id: "nachrichten", label: "Nachrichten", badge: nachrichtenBadge > 0 ? nachrichtenBadge : null },
     { id: "erstellen", label: "Erstellen", badge: null },
     { id: "passwort", label: "Passwort", badge: null },
   ];
@@ -515,7 +564,7 @@ export default function AdminSeite({ benutzer, onLogout }) {
           ))}
         </div>
 
-        {/* Pending requests banner */}
+        {/* Pending banner */}
         {offeneAnfragen.length > 0 && (
           <div style={a.pendingBanner} onClick={() => setTab("kalender")}>
             <span style={{ fontSize: "18px" }}>⏳</span>
@@ -558,7 +607,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
         {tab === "kalender" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <div style={a.card}>
-              {/* Week nav */}
               <div style={a.calNav}>
                 <button style={a.navBtn} onClick={() => { const d = new Date(kalWoche); d.setDate(d.getDate() - 7); setKalWoche(d); setGewählterTag(null); }}>←</button>
                 <span style={a.calTitle}>
@@ -567,7 +615,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
                 <button style={a.navBtn} onClick={() => { const d = new Date(kalWoche); d.setDate(d.getDate() + 7); setKalWoche(d); setGewählterTag(null); }}>→</button>
               </div>
 
-              {/* Week grid */}
               <div style={a.weekScroll}>
                 <div style={a.weekGrid}>
                   {wochentage.map((tag, i) => {
@@ -621,7 +668,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
                 </div>
               </div>
 
-              {/* Legend */}
               <div style={a.legend}>
                 {[["#22c55e", "Gebucht"], ["#f59e0b", "Anfrage"], ["rgba(160,136,122,0.3)", "Offen"], ["#fb923c", "Abgesagt"], ["#ef4444", "Abgelehnt"]].map(([c, l]) => (
                   <div key={l} style={a.legendItem}>
@@ -632,7 +678,6 @@ export default function AdminSeite({ benutzer, onLogout }) {
               </div>
             </div>
 
-            {/* Day detail */}
             {gewählterTag && (
               <div style={{ ...a.card, animation: "slideDown 0.2s ease" }}>
                 <div style={a.dayDetailHeader}>
@@ -646,15 +691,10 @@ export default function AdminSeite({ benutzer, onLogout }) {
                       </span>
                     )}
                     <span style={{ fontSize: "12px", color: "#c0a898" }}>{tagTermine.length} gesamt</span>
-
                     {tagTermine.length > 0 && (
                       <button
                         style={auswahlModus ? a.auswahlBtnActive : a.auswahlBtn}
-                        onClick={() => {
-                          setAuswahlModus(!auswahlModus);
-                          setAusgewählt(new Set());
-                          closeAllOverlays();
-                        }}
+                        onClick={() => { setAuswahlModus(!auswahlModus); setAusgewählt(new Set()); closeAllOverlays(); }}
                       >
                         {auswahlModus ? "✕ Abbrechen" : "☑ Auswählen"}
                       </button>
@@ -662,18 +702,12 @@ export default function AdminSeite({ benutzer, onLogout }) {
                   </div>
                 </div>
 
-                {/* Auswahl-Toolbar */}
                 {auswahlModus && tagTermine.length > 0 && (
                   <div style={a.auswahlToolbar}>
-                    <button
-                      style={a.auswahlAlleBtn}
-                      onClick={() => alleTagTermineAuswählen(tagTermine)}
-                    >
+                    <button style={a.auswahlAlleBtn} onClick={() => alleTagTermineAuswählen(tagTermine)}>
                       {tagTermine.every(t => ausgewählt.has(t.termin_id)) ? "Alle abwählen" : "Alle auswählen"}
                     </button>
-                    <span style={{ fontSize: "12px", color: "#a0887a" }}>
-                      {ausgewählt.size} ausgewählt
-                    </span>
+                    <span style={{ fontSize: "12px", color: "#a0887a" }}>{ausgewählt.size} ausgewählt</span>
                     {ausgewählt.size > 0 && (
                       <button style={a.auswahlLoeschenBtn} onClick={ausgewählteLoeschen}>
                         🗑 {ausgewählt.size} löschen
@@ -691,6 +725,126 @@ export default function AdminSeite({ benutzer, onLogout }) {
                     {tagTermine.map(t => renderTerminKarte(t))}
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ─── TAB: NACHRICHTEN ─── */}
+        {tab === "nachrichten" && (
+          <div style={a.card}>
+            {!aktiverKunde ? (
+              // Konversationsliste
+              <div>
+                <h3 style={{ margin: "0 0 14px", fontSize: "15px", fontWeight: "600", color: "#2c1810", fontFamily: "'Cormorant Garamond', serif" }}>
+                  Kundennachrichten
+                </h3>
+                {konversationen.length === 0 ? (
+                  <p style={{ color: "#d4c5b5", textAlign: "center", padding: "32px 0", fontSize: "13px", margin: 0 }}>
+                    Noch keine Nachrichten von Kunden
+                  </p>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    {konversationen.map(k => (
+                      <div
+                        key={k.benutzer_id}
+                        style={a.konvRow}
+                        onClick={() => konversationÖffnen(k)}
+                      >
+                        <div style={a.konvAvatar}>
+                          {k.vorname[0]}{k.nachname[0]}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+                            <span style={a.konvName}>{k.vorname} {k.nachname}</span>
+                            <span style={a.konvZeit}>{fmtDatum(k.letzte_zeit)} {fmtZeit(k.letzte_zeit)}</span>
+                          </div>
+                          <p style={a.konvVorschau}>{k.letzte_nachricht}</p>
+                        </div>
+                        {k.ungelesen > 0 && (
+                          <span style={a.konvBadge}>{k.ungelesen}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Neue Konversation starten */}
+                <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #f0ebe4" }}>
+                  <p style={{ margin: "0 0 10px", fontSize: "11px", color: "#a0887a", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: "600" }}>
+                    Nachricht an Kunden senden
+                  </p>
+                  <NachrichtAnKunde
+                    benutzerListe={benutzerListe}
+                    adminId={benutzer.id}
+                    onSent={(kunde) => { ladeKonversationen(); konversationÖffnen(kunde); }}
+                    zeig={zeig}
+                    API={API}
+                  />
+                </div>
+              </div>
+            ) : (
+              // Chat-Ansicht
+              <div style={{ display: "flex", flexDirection: "column", height: "520px" }}>
+                {/* Chat-Header */}
+                <div style={a.chatHeader}>
+                  <button style={a.backBtn} onClick={() => { setAktiverKunde(null); setNachrichten([]); }}>
+                    ← Zurück
+                  </button>
+                  <div style={a.chatAvatar}>
+                    {aktiverKunde.vorname[0]}{aktiverKunde.nachname[0]}
+                  </div>
+                  <div>
+                    <p style={a.chatName}>{aktiverKunde.vorname} {aktiverKunde.nachname}</p>
+                    <p style={a.chatSub}>Privater Chat</p>
+                  </div>
+                </div>
+
+                {/* Nachrichten */}
+                <div style={a.chatBody}>
+                  {nachrichten.length === 0 ? (
+                    <p style={{ color: "#d4c5b5", textAlign: "center", fontSize: "13px", margin: "auto" }}>
+                      Noch keine Nachrichten
+                    </p>
+                  ) : (
+                    nachrichten.map(n => {
+                      const vonAdmin = n.sender_typ === "admin";
+                      return (
+                        <div key={n.nachrichten_id} style={{ display: "flex", justifyContent: vonAdmin ? "flex-end" : "flex-start", marginBottom: "8px" }}>
+                          <div style={{
+                            ...a.bubble,
+                            background: vonAdmin ? "linear-gradient(135deg, #2c1810 0%, #5c3d2e 100%)" : "white",
+                            color: vonAdmin ? "#e8d5be" : "#2c1810",
+                            borderColor: vonAdmin ? "transparent" : "#ede8e0",
+                            borderRadius: vonAdmin ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                            boxShadow: vonAdmin ? "0 2px 8px rgba(44,24,16,0.2)" : "0 1px 4px rgba(92,61,46,0.08)",
+                          }}>
+                            <p style={{ margin: "0 0 4px", fontSize: "13px", lineHeight: 1.5 }}>{n.text}</p>
+                            <p style={{ margin: 0, fontSize: "10px", opacity: 0.6, textAlign: "right" }}>
+                              {fmtZeit(n.erstellt_am)}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+
+                {/* Eingabe */}
+                <div style={a.chatInput}>
+                  <input
+                    type="text"
+                    style={a.chatTextInput}
+                    placeholder="Nachricht schreiben …"
+                    value={nachrichtText}
+                    onChange={e => setNachrichtText(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && nachrichtSenden()}
+                  />
+                  <button style={a.sendBtn} onClick={nachrichtSenden} disabled={!nachrichtText.trim()}>
+                    ➤
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -820,6 +974,56 @@ export default function AdminSeite({ benutzer, onLogout }) {
   );
 }
 
+// ─── Hilfskomponente: Neue Nachricht an beliebigen Kunden senden ──────────────
+function NachrichtAnKunde({ benutzerListe, adminId, onSent, zeig, API }) {
+  const [empfaenger, setEmpfaenger] = useState("");
+  const [text, setText] = useState("");
+
+  async function senden() {
+    if (!empfaenger) return zeig("Kunden auswählen", "fehler");
+    if (!text.trim()) return zeig("Nachricht eingeben", "fehler");
+    const res = await fetch(`${API}/admin/nachrichten/${empfaenger}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminId, text: text.trim() }),
+    });
+    const d = await res.json();
+    if (d.error) return zeig(d.error, "fehler");
+    const kunde = benutzerListe.find(b => String(b.benutzer_id) === String(empfaenger));
+    setText("");
+    setEmpfaenger("");
+    onSent(kunde);
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <select
+        style={a.formInput}
+        value={empfaenger}
+        onChange={e => setEmpfaenger(e.target.value)}
+      >
+        <option value="">— Kunde auswählen —</option>
+        {benutzerListe.filter(b => b.typ === "kunde").map(b => (
+          <option key={b.benutzer_id} value={b.benutzer_id}>{b.vorname} {b.nachname}</option>
+        ))}
+      </select>
+      <div style={{ display: "flex", gap: "6px" }}>
+        <input
+          type="text"
+          style={{ ...a.formInput, flex: 1 }}
+          placeholder="Nachricht …"
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && senden()}
+        />
+        <button style={{ ...a.primaryBtnSolid, padding: "9px 16px" }} onClick={senden}>
+          Senden
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const a = {
   page: {
     minHeight: "100vh", background: "#f7f4f0",
@@ -928,14 +1132,9 @@ const a = {
     borderRadius: "16px", padding: "16px",
     boxShadow: "0 2px 12px rgba(92,61,46,0.05)",
   },
-  calNav: {
-    display: "flex", alignItems: "center", justifyContent: "space-between",
-    marginBottom: "14px",
-  },
-  calTitle: {
-    fontSize: "14px", fontWeight: "600", color: "#2c1810",
-    fontFamily: "'Cormorant Garamond', serif",
-  },
+  // Kalender
+  calNav: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "14px" },
+  calTitle: { fontSize: "14px", fontWeight: "600", color: "#2c1810", fontFamily: "'Cormorant Garamond', serif" },
   navBtn: {
     width: "32px", height: "32px",
     border: "1px solid #ede8e0", borderRadius: "8px",
@@ -944,10 +1143,7 @@ const a = {
     display: "flex", alignItems: "center", justifyContent: "center",
   },
   weekScroll: { overflowX: "auto", marginBottom: "4px" },
-  weekGrid: {
-    display: "grid", gridTemplateColumns: "repeat(7, minmax(52px, 1fr))",
-    gap: "5px", minWidth: "360px",
-  },
+  weekGrid: { display: "grid", gridTemplateColumns: "repeat(7, minmax(52px, 1fr))", gap: "5px", minWidth: "360px" },
   dayCell: {
     border: "1px solid #ede8e0", borderRadius: "10px",
     padding: "8px 4px",
@@ -962,21 +1158,10 @@ const a = {
     border: "1.5px solid #2c1810",
     boxShadow: "0 3px 10px rgba(44,24,16,0.2)",
   },
-  legend: {
-    display: "flex", gap: "12px",
-    marginTop: "12px", paddingTop: "12px",
-    borderTop: "1px solid #f5f0eb",
-    flexWrap: "wrap",
-  },
+  legend: { display: "flex", gap: "12px", marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #f5f0eb", flexWrap: "wrap" },
   legendItem: { display: "flex", alignItems: "center", gap: "5px", fontSize: "10px", color: "#a0887a" },
-  dayDetailHeader: {
-    display: "flex", justifyContent: "space-between", alignItems: "flex-start",
-    marginBottom: "14px", gap: "8px", flexWrap: "wrap",
-  },
-  dayDetailTitle: {
-    margin: 0, fontSize: "15px", fontWeight: "600",
-    color: "#2c1810", fontFamily: "'Cormorant Garamond', serif",
-  },
+  dayDetailHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "14px", gap: "8px", flexWrap: "wrap" },
+  dayDetailTitle: { margin: 0, fontSize: "15px", fontWeight: "600", color: "#2c1810", fontFamily: "'Cormorant Garamond', serif" },
   anfrageBadge: {
     padding: "2px 10px", borderRadius: "20px",
     fontSize: "11px", fontWeight: "600",
@@ -984,17 +1169,13 @@ const a = {
     border: "1px solid rgba(245,158,11,0.3)",
   },
   auswahlBtn: {
-    padding: "4px 10px",
-    border: "1px solid #ede8e0", borderRadius: "6px",
-    background: "white", cursor: "pointer",
-    fontSize: "11px", color: "#8b6347",
+    padding: "4px 10px", border: "1px solid #ede8e0", borderRadius: "6px",
+    background: "white", cursor: "pointer", fontSize: "11px", color: "#8b6347",
     fontFamily: "'DM Sans', sans-serif",
   },
   auswahlBtnActive: {
-    padding: "4px 10px",
-    border: "1px solid #fca5a5", borderRadius: "6px",
-    background: "rgba(239,68,68,0.05)", cursor: "pointer",
-    fontSize: "11px", color: "#b91c1c",
+    padding: "4px 10px", border: "1px solid #fca5a5", borderRadius: "6px",
+    background: "rgba(239,68,68,0.05)", cursor: "pointer", fontSize: "11px", color: "#b91c1c",
     fontFamily: "'DM Sans', sans-serif",
   },
   auswahlToolbar: {
@@ -1004,19 +1185,15 @@ const a = {
     borderRadius: "10px", flexWrap: "wrap",
   },
   auswahlAlleBtn: {
-    padding: "5px 12px",
-    border: "1px solid #ede8e0", borderRadius: "6px",
-    background: "white", cursor: "pointer",
-    fontSize: "11px", color: "#8b6347",
+    padding: "5px 12px", border: "1px solid #ede8e0", borderRadius: "6px",
+    background: "white", cursor: "pointer", fontSize: "11px", color: "#8b6347",
     fontFamily: "'DM Sans', sans-serif",
   },
   auswahlLoeschenBtn: {
-    padding: "5px 14px",
-    border: "1px solid #fca5a5", borderRadius: "6px",
+    padding: "5px 14px", border: "1px solid #fca5a5", borderRadius: "6px",
     background: "rgba(239,68,68,0.06)", cursor: "pointer",
     fontSize: "11px", fontWeight: "600", color: "#b91c1c",
-    fontFamily: "'DM Sans', sans-serif",
-    marginLeft: "auto",
+    fontFamily: "'DM Sans', sans-serif", marginLeft: "auto",
   },
   checkbox: {
     width: "20px", height: "20px", flexShrink: 0,
@@ -1025,126 +1202,100 @@ const a = {
     display: "flex", alignItems: "center", justifyContent: "center",
     transition: "all 0.15s",
   },
-  terminCard: {
-    border: "1.5px solid #ede8e0", borderRadius: "12px",
-    overflow: "hidden", transition: "all 0.15s",
-  },
-  terminHead: {
-    display: "flex", alignItems: "flex-start", gap: "10px",
-    padding: "12px 12px",
-  },
-  terminTime: {
-    fontSize: "17px", fontWeight: "700",
-    color: "#5c3d2e", minWidth: "46px",
-    fontFamily: "'Cormorant Garamond', serif",
-  },
+  // Termin-Karten
+  terminCard: { border: "1.5px solid #ede8e0", borderRadius: "12px", overflow: "hidden", transition: "all 0.15s" },
+  terminHead: { display: "flex", alignItems: "flex-start", gap: "10px", padding: "12px 12px" },
+  terminTime: { fontSize: "17px", fontWeight: "700", color: "#5c3d2e", minWidth: "46px", fontFamily: "'Cormorant Garamond', serif" },
   terminName: { fontWeight: "600", fontSize: "13px", color: "#2c1810" },
   terminNameEmpty: { color: "#d4c5b5", fontSize: "13px" },
   terminNotiz: { fontSize: "11px", color: "#0369a1", marginTop: "3px" },
   terminAbsageGrund: { fontSize: "11px", color: "#a0887a", marginTop: "3px", fontStyle: "italic" },
-  statusBadge: {
-    display: "inline-flex",
-    padding: "3px 9px", borderRadius: "20px",
-    fontSize: "10px", fontWeight: "600",
-    whiteSpace: "nowrap",
-  },
-  iconBtn: {
-    width: "28px", height: "28px",
-    border: "1px solid #ede8e0", borderRadius: "6px",
-    background: "white", cursor: "pointer",
-    fontSize: "12px", color: "#8b6347",
-    display: "flex", alignItems: "center", justifyContent: "center",
-  },
-  iconBtnDanger: {
-    width: "28px", height: "28px",
-    border: "1px solid #fca5a5", borderRadius: "6px",
-    background: "white", cursor: "pointer",
-    fontSize: "11px", color: "#b91c1c",
-    display: "flex", alignItems: "center", justifyContent: "center",
-  },
-  actionBar: {
-    padding: "8px 12px 10px",
-    display: "flex", gap: "6px", flexWrap: "wrap",
-    borderTop: "1px solid rgba(237,232,224,0.7)",
-    background: "rgba(255,255,255,0.6)",
-  },
-  confirmBtn: {
-    padding: "5px 14px",
-    border: "1px solid rgba(74,222,128,0.4)", borderRadius: "6px",
-    background: "rgba(74,222,128,0.08)", cursor: "pointer",
-    fontSize: "12px", fontWeight: "600", color: "#166534",
-    fontFamily: "'DM Sans', sans-serif",
-  },
-  declineBtn: {
-    padding: "5px 12px", border: "1px solid #fca5a5", borderRadius: "6px",
-    background: "white", cursor: "pointer", fontSize: "12px", color: "#b91c1c",
-    fontFamily: "'DM Sans', sans-serif",
-  },
-  cancelBtn: {
-    padding: "5px 12px", border: "1px solid #fca5a5", borderRadius: "6px",
-    background: "white", cursor: "pointer", fontSize: "12px", color: "#b91c1c",
-    fontFamily: "'DM Sans', sans-serif",
-  },
+  statusBadge: { display: "inline-flex", padding: "3px 9px", borderRadius: "20px", fontSize: "10px", fontWeight: "600", whiteSpace: "nowrap" },
+  iconBtn: { width: "28px", height: "28px", border: "1px solid #ede8e0", borderRadius: "6px", background: "white", cursor: "pointer", fontSize: "12px", color: "#8b6347", display: "flex", alignItems: "center", justifyContent: "center" },
+  iconBtnDanger: { width: "28px", height: "28px", border: "1px solid #fca5a5", borderRadius: "6px", background: "white", cursor: "pointer", fontSize: "11px", color: "#b91c1c", display: "flex", alignItems: "center", justifyContent: "center" },
+  actionBar: { padding: "8px 12px 10px", display: "flex", gap: "6px", flexWrap: "wrap", borderTop: "1px solid rgba(237,232,224,0.7)", background: "rgba(255,255,255,0.6)" },
+  confirmBtn: { padding: "5px 14px", border: "1px solid rgba(74,222,128,0.4)", borderRadius: "6px", background: "rgba(74,222,128,0.08)", cursor: "pointer", fontSize: "12px", fontWeight: "600", color: "#166534", fontFamily: "'DM Sans', sans-serif" },
+  declineBtn: { padding: "5px 12px", border: "1px solid #fca5a5", borderRadius: "6px", background: "white", cursor: "pointer", fontSize: "12px", color: "#b91c1c", fontFamily: "'DM Sans', sans-serif" },
+  cancelBtn: { padding: "5px 12px", border: "1px solid #fca5a5", borderRadius: "6px", background: "white", cursor: "pointer", fontSize: "12px", color: "#b91c1c", fontFamily: "'DM Sans', sans-serif" },
   waitingText: { fontSize: "11px", color: "#c0a898", lineHeight: "28px" },
-  inlineForm: {
-    padding: "14px 12px", borderTop: "1px solid #ede8e0",
-    background: "white", display: "flex", flexDirection: "column", gap: "10px",
-  },
+  inlineForm: { padding: "14px 12px", borderTop: "1px solid #ede8e0", background: "white", display: "flex", flexDirection: "column", gap: "10px" },
   inlineTitle: { margin: 0, fontSize: "13px", fontWeight: "600", color: "#2c1810" },
   formGroup: { display: "flex", flexDirection: "column", gap: "5px", flex: 1 },
-  formLabel: {
-    fontSize: "10px", fontWeight: "600", color: "#a0887a",
-    textTransform: "uppercase", letterSpacing: "0.06em",
-  },
-  formInput: {
-    padding: "9px 12px", border: "1.5px solid #ede8e0", borderRadius: "8px",
-    fontSize: "13px", background: "#fdfcfb",
-    outline: "none", fontFamily: "'DM Sans', sans-serif",
-    color: "#2c1810", width: "100%", boxSizing: "border-box",
-  },
+  formLabel: { fontSize: "10px", fontWeight: "600", color: "#a0887a", textTransform: "uppercase", letterSpacing: "0.06em" },
+  formInput: { padding: "9px 12px", border: "1.5px solid #ede8e0", borderRadius: "8px", fontSize: "13px", background: "#fdfcfb", outline: "none", fontFamily: "'DM Sans', sans-serif", color: "#2c1810", width: "100%", boxSizing: "border-box" },
   inlineBtns: { display: "flex", gap: "6px", flexWrap: "wrap" },
-  confirmBtnSolid: {
-    padding: "8px 16px",
-    background: "linear-gradient(135deg, #14532d 0%, #166534 100%)",
-    color: "white", border: "none", borderRadius: "8px",
-    cursor: "pointer", fontSize: "12px", fontWeight: "500",
-    fontFamily: "'DM Sans', sans-serif",
+  confirmBtnSolid: { padding: "8px 16px", background: "linear-gradient(135deg, #14532d 0%, #166534 100%)", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "12px", fontWeight: "500", fontFamily: "'DM Sans', sans-serif" },
+  dangerBtnSolid: { padding: "8px 16px", background: "linear-gradient(135deg, #991b1b 0%, #b91c1c 100%)", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "12px", fontWeight: "500", fontFamily: "'DM Sans', sans-serif" },
+  primaryBtnSolid: { padding: "11px 20px", background: "linear-gradient(135deg, #2c1810 0%, #5c3d2e 100%)", color: "#e8d5be", border: "none", borderRadius: "10px", cursor: "pointer", fontSize: "13px", fontWeight: "500", fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.02em", boxShadow: "0 3px 12px rgba(44,24,16,0.2)" },
+  ghostBtn: { padding: "8px 14px", border: "1px solid #ede8e0", borderRadius: "8px", background: "white", cursor: "pointer", fontSize: "12px", color: "#8b6347", fontFamily: "'DM Sans', sans-serif" },
+  formRow: { display: "flex", gap: "10px", flexWrap: "wrap" },
+  previewBox: { padding: "10px 14px", background: "#fdfcfb", border: "1px solid #ede8e0", borderRadius: "8px", fontSize: "12px", color: "#a0887a", lineHeight: 1.6 },
+  toggleRow: { display: "flex", gap: "6px", marginBottom: "18px" },
+  toggleBtn: { padding: "7px 16px", border: "1px solid #ede8e0", borderRadius: "8px", background: "white", cursor: "pointer", fontSize: "12px", color: "#a0887a", fontFamily: "'DM Sans', sans-serif" },
+  toggleActive: { padding: "7px 16px", border: "1.5px solid #2c1810", borderRadius: "8px", background: "#2c1810", cursor: "pointer", fontSize: "12px", color: "#e8d5be", fontWeight: "500", fontFamily: "'DM Sans', sans-serif" },
+  // Nachrichten
+  konvRow: {
+    display: "flex", alignItems: "center", gap: "12px",
+    padding: "12px", borderRadius: "12px",
+    border: "1px solid #f0ebe4", cursor: "pointer",
+    transition: "all 0.15s", background: "#fdfcfb",
   },
-  dangerBtnSolid: {
-    padding: "8px 16px",
-    background: "linear-gradient(135deg, #991b1b 0%, #b91c1c 100%)",
-    color: "white", border: "none", borderRadius: "8px",
-    cursor: "pointer", fontSize: "12px", fontWeight: "500",
-    fontFamily: "'DM Sans', sans-serif",
-  },
-  primaryBtnSolid: {
-    padding: "11px 20px",
+  konvAvatar: {
+    width: "40px", height: "40px", flexShrink: 0, borderRadius: "50%",
     background: "linear-gradient(135deg, #2c1810 0%, #5c3d2e 100%)",
-    color: "#e8d5be", border: "none", borderRadius: "10px",
-    cursor: "pointer", fontSize: "13px", fontWeight: "500",
-    fontFamily: "'DM Sans', sans-serif",
-    letterSpacing: "0.02em",
-    boxShadow: "0 3px 12px rgba(44,24,16,0.2)",
+    color: "#e8d5be", display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: "13px", fontWeight: "600", letterSpacing: "0.04em",
   },
-  ghostBtn: {
-    padding: "8px 14px", border: "1px solid #ede8e0", borderRadius: "8px",
+  konvName: { fontSize: "13px", fontWeight: "600", color: "#2c1810", margin: 0 },
+  konvVorschau: { fontSize: "12px", color: "#a0887a", margin: "2px 0 0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  konvZeit: { fontSize: "10px", color: "#c0a898", whiteSpace: "nowrap", flexShrink: 0 },
+  konvBadge: {
+    background: "#2c1810", color: "#e8d5be",
+    borderRadius: "10px", fontSize: "10px", fontWeight: "700",
+    padding: "2px 7px", flexShrink: 0,
+  },
+  chatHeader: {
+    display: "flex", alignItems: "center", gap: "10px",
+    padding: "0 0 14px", borderBottom: "1px solid #f0ebe4",
+    marginBottom: "0", flexShrink: 0,
+  },
+  backBtn: {
+    padding: "6px 10px", border: "1px solid #ede8e0", borderRadius: "8px",
     background: "white", cursor: "pointer", fontSize: "12px", color: "#8b6347",
     fontFamily: "'DM Sans', sans-serif",
   },
-  formRow: { display: "flex", gap: "10px", flexWrap: "wrap" },
-  previewBox: {
-    padding: "10px 14px", background: "#fdfcfb", border: "1px solid #ede8e0",
-    borderRadius: "8px", fontSize: "12px", color: "#a0887a", lineHeight: 1.6,
+  chatAvatar: {
+    width: "36px", height: "36px", flexShrink: 0, borderRadius: "50%",
+    background: "linear-gradient(135deg, #2c1810 0%, #5c3d2e 100%)",
+    color: "#e8d5be", display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: "12px", fontWeight: "600",
   },
-  toggleRow: { display: "flex", gap: "6px", marginBottom: "18px" },
-  toggleBtn: {
-    padding: "7px 16px", border: "1px solid #ede8e0", borderRadius: "8px",
-    background: "white", cursor: "pointer", fontSize: "12px", color: "#a0887a",
-    fontFamily: "'DM Sans', sans-serif",
+  chatName: { margin: 0, fontSize: "13px", fontWeight: "600", color: "#2c1810" },
+  chatSub: { margin: 0, fontSize: "10px", color: "#c0a898" },
+  chatBody: {
+    flex: 1, overflowY: "auto", padding: "14px 0",
+    display: "flex", flexDirection: "column",
   },
-  toggleActive: {
-    padding: "7px 16px", border: "1.5px solid #2c1810", borderRadius: "8px",
-    background: "#2c1810", cursor: "pointer", fontSize: "12px", color: "#e8d5be", fontWeight: "500",
-    fontFamily: "'DM Sans', sans-serif",
+  bubble: {
+    maxWidth: "75%", padding: "10px 14px",
+    border: "1px solid transparent", borderRadius: "16px",
+  },
+  chatInput: {
+    display: "flex", gap: "8px", alignItems: "center",
+    paddingTop: "12px", borderTop: "1px solid #f0ebe4",
+    flexShrink: 0,
+  },
+  chatTextInput: {
+    flex: 1, padding: "10px 14px",
+    border: "1.5px solid #ede8e0", borderRadius: "10px",
+    fontSize: "13px", fontFamily: "'DM Sans', sans-serif",
+    color: "#2c1810", background: "#fdfcfb", outline: "none",
+  },
+  sendBtn: {
+    width: "40px", height: "40px", flexShrink: 0,
+    background: "linear-gradient(135deg, #2c1810 0%, #5c3d2e 100%)",
+    color: "#e8d5be", border: "none", borderRadius: "10px",
+    cursor: "pointer", fontSize: "14px",
+    display: "flex", alignItems: "center", justifyContent: "center",
   },
 };
